@@ -1,0 +1,65 @@
+name: Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Never cancel a run that may be waiting on a production approval.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    uses: ./.github/workflows/reusable-node-ci.yml
+    with:
+      node-version: '22'
+      script: lint
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22']
+        suite: [test:unit, test:integration]
+    uses: ./.github/workflows/reusable-node-ci.yml
+    with:
+      node-version: ${{ matrix.node }}
+      script: ${{ matrix.suite }}
+
+  build:
+    needs: [lint, test]
+    uses: ./.github/workflows/reusable-node-ci.yml
+    with:
+      node-version: '22'
+      script: test
+      upload-build: true
+
+  # The same reusable workflow deploys every environment; only the input changes.
+  deploy-dev:
+    if: github.event_name != 'pull_request'
+    needs: build
+    uses: ./.github/workflows/reusable-deploy.yml
+    with:
+      environment: dev
+    secrets: inherit
+
+  deploy-staging:
+    needs: deploy-dev
+    uses: ./.github/workflows/reusable-deploy.yml
+    with:
+      environment: staging
+    secrets: inherit
+
+  deploy-production:
+    needs: deploy-staging
+    uses: ./.github/workflows/reusable-deploy.yml
+    with:
+      environment: production
+    secrets: inherit

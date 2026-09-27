@@ -1,0 +1,52 @@
+name: Reusable Node CI
+
+# Checkout -> setup-node -> npm ci -> npm run <script>.
+# Every CI job in this repository used to repeat these steps; now they call this.
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: Node.js version to install
+        type: string
+        required: true
+      script:
+        description: npm script to run after npm ci
+        type: string
+        required: true
+      upload-build:
+        description: Package src/ and upload it as the build artifact
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    name: ${{ inputs.script }} (node ${{ inputs.node-version }})
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run ${{ inputs.script }}
+
+      - name: Package build
+        if: inputs.upload-build
+        run: |
+          mkdir -p dist
+          npm ci --omit=dev
+          tar -czf dist/app.tgz src package.json package-lock.json node_modules
+
+      - uses: actions/upload-artifact@v7
+        if: inputs.upload-build
+        with:
+          name: app-${{ github.sha }}
+          path: dist/app.tgz
+          retention-days: 7

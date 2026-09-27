@@ -1,0 +1,109 @@
+name: Reusable Deploy
+
+# One deploy job, parameterised by environment name. The job binds to the
+# GitHub environment, so `vars.*` and `secrets.*` resolve to that environment's
+# values and any protection rules (required reviewers, branch policy) apply.
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: GitHub environment to deploy to (dev, staging, production)
+        type: string
+        required: true
+      node-version:
+        description: Node.js version used to run the smoke test
+        type: string
+        default: '22'
+    outputs:
+      url:
+        description: URL of the deployed environment
+        value: ${{ jobs.deploy.outputs.url }}
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: deploy (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ vars.APP_URL }}
+    outputs:
+      url: ${{ vars.APP_URL }}
+    env:
+      # Repository-level variable: same for every environment.
+      APP_NAME: ${{ vars.APP_NAME }}
+      # Environment-level variables: differ per environment.
+      APP_ENV: ${{ inputs.environment }}
+      APP_URL: ${{ vars.APP_URL }}
+      LOG_LEVEL: ${{ vars.LOG_LEVEL }}
+      REPLICAS: ${{ vars.REPLICAS }}
+    steps:
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: app-${{ github.sha }}
+
+      - name: Check configuration
+        env:
+          # Environment secret. Masked in logs; only its presence is checked here.
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+        run: |
+          missing=0
+          for name in APP_NAME APP_URL LOG_LEVEL REPLICAS DEPLOY_TOKEN; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is not set for environment '$APP_ENV'"
+              missing=1
+            fi
+          done
+          exit $missing
+
+      - name: Deploy
+        env:
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+        run: |
+          mkdir -p release && tar -xzf app.tgz -C release
+          # Stand-in for a real deploy: record what would be shipped, and a
+          # fingerprint of the token so runs prove which secret was used
+          # without ever printing it.
+          token_fp=$(printf '%s' "$DEPLOY_TOKEN" | sha256sum | cut -c1-12)
+          cat > release/deploy-manifest.json <<EOF
+          {
+            "app": "$APP_NAME",
+            "environment": "$APP_ENV",
+            "url": "$APP_URL",
+            "logLevel": "$LOG_LEVEL",
+            "replicas": $REPLICAS,
+            "commit": "$GITHUB_SHA",
+            "tokenFingerprint": "$token_fp"
+          }
+          EOF
+          cat release/deploy-manifest.json
+
+      - name: Smoke test
+        working-directory: release
+        run: |
+          PORT=3000 node src/server.js &
+          for i in $(seq 1 20); do
+            curl -fsS http://localhost:3000/health && exit 0
+            sleep 0.5
+          done
+          echo "::error::app did not become healthy"
+          exit 1
+
+      - name: Summary
+        run: |
+          {
+            echo "### Deployed \`$APP_NAME\` to **$APP_ENV**"
+            echo
+            echo "| Setting | Value |"
+            echo "| --- | --- |"
+            echo "| URL | $APP_URL |"
+            echo "| LOG_LEVEL | $LOG_LEVEL |"
+            echo "| REPLICAS | $REPLICAS |"
+            echo "| Commit | \`${GITHUB_SHA::7}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
